@@ -138,4 +138,4 @@ class FinanceNews24hFetcher:
 
 
 fetcher = FinanceNews24hFetcher()
-fetcher.watch_news(interval=180)
+fetcher.watch_news(interval=60)

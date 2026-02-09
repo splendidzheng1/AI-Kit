@@ -1,0 +1,2 @@
+为如下元素编写可精确定位的 XPath：<div class="th-inner">类型</div>。
+优先顺序：① id；② class；③ innerText（“类型”）；④ 位置；⑤ 其他属性。要求简洁、明确并包含 type 信息
