@@ -229,6 +229,20 @@
       min-width: 32px;
       text-align: center;
     }
+    .score-input-number {
+      width: 50px;
+      text-align: center;
+      border: 1px solid #dee2e6;
+      border-radius: 4px;
+      padding: 4px 2px;
+      font-weight: 600;
+      color: #495057;
+      font-size: 0.95rem;
+    }
+    .score-input-number:focus {
+      outline: none;
+      border-color: #667eea;
+    }
     .inline-slider {
       display: flex;
       align-items: center;
@@ -429,7 +443,14 @@
                       max="100"
                       @input="updateChartDebounced"
                     >
-                    <span class="score-value">{{ job.scores[dim] || 0 }}</span>
+                    <input 
+                      type="number" 
+                      class="score-input-number"
+                      v-model.number="job.scores[dim]" 
+                      min="1" 
+                      max="100"
+                      @input="updateChartDebounced"
+                    >
                   </div>
                 </div>
               </div>
