@@ -1,6 +1,7 @@
 import ast
 import json
 import os
+import sys
 from typing import Any
 
 from cozepy import (
@@ -69,22 +70,61 @@ def recursive_json_loads(data: Any, max_depth: int = 10) -> Any:
     return _parse(data, 0)
 
 
-# 从环境变量读取 Coze API Token，避免硬编码敏感信息
-coze_api_token = os.environ.get("COZE_API_TOKEN", "")
-if not coze_api_token:
-    raise ValueError(
-        "COZE_API_TOKEN 环境变量未设置。请在运行前执行：\n"
-        "  export COZE_API_TOKEN='your_token_here'"
+def run_coze_workflow(request_info: dict | None = None) -> dict:
+    """
+    运行 Coze 内容审核工作流。
+
+    Args:
+        request_info: 传入工作流的参数字典，默认为空。
+
+    Returns:
+        解析后的审核结果字典。
+
+    Raises:
+        ValueError: COZE_API_TOKEN 环境变量未设置。
+        RuntimeError: Coze API 调用失败。
+    """
+    # 从环境变量读取 Coze API Token，避免硬编码敏感信息
+    coze_api_token = os.environ.get("COZE_API_TOKEN", "")
+    if not coze_api_token:
+        raise ValueError(
+            "COZE_API_TOKEN 环境变量未设置。请在运行前执行：\n"
+            "  export COZE_API_TOKEN='your_token_here'  (macOS/Linux)\n"
+            "  set COZE_API_TOKEN=your_token_here       (Windows CMD)\n"
+            "  $env:COZE_API_TOKEN='your_token_here'    (PowerShell)"
+        )
+
+    coze = Coze(
+        auth=TokenAuth(token=coze_api_token),
+        base_url=COZE_CN_BASE_URL,
     )
 
-coze_api_base = COZE_CN_BASE_URL
+    workflow_id = "7525739855999352832"
+    payload = request_info if request_info is not None else {}
 
-coze = Coze(auth=TokenAuth(token=coze_api_token), base_url=coze_api_base)
+    try:
+        workflow = coze.workflows.runs.create(
+            workflow_id=workflow_id, parameters={"input": payload}
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Coze 工作流调用失败: {exc}") from exc
 
-workflow_id = "7525739855999352832"
-dict_request_info = {}
-workflow = coze.workflows.runs.create(
-    workflow_id=workflow_id, parameters={"input": dict_request_info}
-)
+    return recursive_json_loads(workflow.data)
 
-dict_censor_data = recursive_json_loads(workflow.data)
+
+def main() -> int:
+    """CLI 入口。"""
+    try:
+        result = run_coze_workflow()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except ValueError as exc:
+        print(f"[配置错误] {exc}", file=sys.stderr)
+        return 1
+    except RuntimeError as exc:
+        print(f"[运行时错误] {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

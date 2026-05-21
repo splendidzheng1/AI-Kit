@@ -1,2 +1,7 @@
 requests>=2.31.0
 cozepy>=0.1.0
+
+# Encapsulation 版本额外依赖（桌面 GUI）
+PyQt6>=6.5.0
+Pillow>=10.0.0
+keyboard>=0.13.5
