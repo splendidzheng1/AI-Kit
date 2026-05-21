@@ -1,5 +1,6 @@
 import ast
 import json
+import os
 from typing import Any
 
 from cozepy import (
@@ -68,7 +69,14 @@ def recursive_json_loads(data: Any, max_depth: int = 10) -> Any:
     return _parse(data, 0)
 
 
-coze_api_token = ""
+# 从环境变量读取 Coze API Token，避免硬编码敏感信息
+coze_api_token = os.environ.get("COZE_API_TOKEN", "")
+if not coze_api_token:
+    raise ValueError(
+        "COZE_API_TOKEN 环境变量未设置。请在运行前执行：\n"
+        "  export COZE_API_TOKEN='your_token_here'"
+    )
+
 coze_api_base = COZE_CN_BASE_URL
 
 coze = Coze(auth=TokenAuth(token=coze_api_token), base_url=coze_api_base)
