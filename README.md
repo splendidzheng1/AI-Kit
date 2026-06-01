@@ -7,6 +7,9 @@
 ### 01-7x24h 实时财经快讯
 - **华尔街见闻快讯抓取** — 支持宏观、A股、美股、区块链、外汇、商品等多频道实时监控
 - **新浪 7x24 财经快讯** — 实时抓取新浪财经滚动新闻，支持分页与去重
+- **封装版（Encapsulation/）** — 基于 PyQt6 的桌面悬浮窗应用，支持全局热键（`Shift+Space`）呼出/隐藏、系统托盘驻留、新闻搜索与图片预览
+  - ⚠️ **额外依赖**：`PyQt6`、`Pillow`、`keyboard`（见下方依赖说明）
+  - ⚠️ **平台限制**：`keyboard` 库在 macOS/Linux 上可能需要 root 权限；Windows 上某些安全软件可能拦截全局热键
 - 自动去重机制，持续轮询模式，按 `Ctrl+C` 优雅退出
 
 ### 02-Job-Tool 工作评估系统
@@ -60,6 +63,13 @@ export COZE_API_TOKEN="your_coze_api_token"
 python 03-Ai-Censor-Job/A_coze_workflow.py
 ```
 
+**封装版财经快讯（桌面悬浮窗）**
+```bash
+# 需要额外安装 PyQt6、Pillow、keyboard
+pip install PyQt6 Pillow keyboard
+python 01-7x24h/Encapsulation/xinlang_news_fetcher.py
+```
+
 ---
 
 ## 技术栈
@@ -70,6 +80,7 @@ python 03-Ai-Censor-Job/A_coze_workflow.py
 | HTTP 请求 | requests |
 | AI 平台 | Coze (cozepy) |
 | 前端可视化 | Vue 3, ECharts 5 |
+| 桌面 GUI | PyQt6, Pillow |
 
 ---
 
