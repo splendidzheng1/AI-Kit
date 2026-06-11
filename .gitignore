@@ -16,3 +16,9 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# 01-7x24h — PyInstaller 中间构建文件
+01-7x24h/build/
+
+# 03-Ai-Censor-Job/C-Agent — 本地 API 密钥
+03-Ai-Censor-Job/C-Agent/.env
