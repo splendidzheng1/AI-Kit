@@ -25,6 +25,7 @@
 - 基于 **Vue 3 + Vue Router** 的家债可视化工具，展示当期与往期家债
 - 自动按到期日划分当期/往期，计算出资人当前应收本息
 - 移动端友好，支持左右滑动切换标签
+- 📁 **源码**：`04-Home-Debt/source/`（完整 Vue 项目源码，含 router、views、data）
 - 🌐 **在线访问**：https://splendidzheng1.github.io/AI-Kit/04-Home-Debt/
 
 ### 00-Prompt AI 提示词库
@@ -78,9 +79,14 @@ python 01-7x24h/Encapsulation/xinlang_news_fetcher.py
 
 **家债管理系统**
 ```bash
-# 直接在浏览器中打开，或访问 GitHub Pages 在线版
-# 本地：open 04-Home-Debt/index.html
-# 在线：https://splendidzheng1.github.io/AI-Kit/04-Home-Debt/
+# 在线访问（构建产物已部署到 GitHub Pages）
+# https://splendidzheng1.github.io/AI-Kit/04-Home-Debt/
+
+# 本地开发 / 修改源码：
+cd 04-Home-Debt/source
+npm install
+npm run dev      # 启动开发服务器
+npm run build    # 构建到 source/dist，再覆盖到 04-Home-Debt/ 根目录
 ```
 
 ---
@@ -114,10 +120,15 @@ AI-Kit/
 │   └── index.html
 ├── 03-Ai-Censor-Job/       # AI 审核工作流
 │   └── A_coze_workflow.py
-├── 04-Home-Debt/           # 家债管理系统（Vue 3 构建产物）
-│   ├── index.html
+├── 04-Home-Debt/           # 家债管理系统
+│   ├── index.html          # 构建产物（Pages 访问入口）
 │   ├── favicon.svg
-│   └── assets/
+│   ├── assets/             # 构建产物（JS/CSS）
+│   └── source/             # 完整 Vue 3 源码
+│       ├── src/
+│       ├── public/
+│       ├── package.json
+│       └── vite.config.js
 ├── requirements.txt
 └── README.md
 ```
