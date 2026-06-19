@@ -30,5 +30,35 @@
       { "name": "郑宝林", "money": 10000 },
       { "name": "郑志恒", "money": 10000 }
     ]
+  },
+  {
+    "issue": "4",
+    "money": 80000,
+    "lending_rate": "2.00%",
+    "begin_date": "2026-06-30",
+    "period": "1y",
+    "owner": [
+      { "name": "张燕珍", "money": 70000 },
+      { "name": "郑宝琳", "money": 10000 }
+    ]
+  },
+  {
+    "issue": "5",
+    "money": 20000,
+    "lending_rate": "2.50%",
+    "begin_date": "2026-06-30",
+    "period": "1y",
+    "owner": [
+      { "name": "张燕珍", "money": 10000 },
+      { "name": "郑宝琳", "money": 10000 }
+    ]
+  },
+  {
+    "issue": "特别1",
+    "money": 5000,
+    "lending_rate": "1.50%",
+    "begin_date": "2026-06-30",
+    "period": "2m",
+    "owner": [{ "name": "郑志恒", "money": 5000 }]
   }
 ]
