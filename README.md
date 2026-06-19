@@ -21,6 +21,12 @@
 - 基于 **Coze 工作流** 的自动化内容审核流水线
 - 内置递归 JSON 解析工具，解决 API 多层嵌套字符串问题
 
+### 04-Home-Debt 家债管理系统
+- 基于 **Vue 3 + Vue Router** 的家债可视化工具，展示当期与往期家债
+- 自动按到期日划分当期/往期，计算出资人当前应收本息
+- 移动端友好，支持左右滑动切换标签
+- 🌐 **在线访问**：https://splendidzheng1.github.io/AI-Kit/04-Home-Debt/
+
 ### 00-Prompt AI 提示词库
 - SQL 语句生成、XPath 语句生成、VBA 程序生成等实用 Prompt
 - 职位评估 Prompt 模板
@@ -70,6 +76,13 @@ pip install PyQt6 Pillow keyboard
 python 01-7x24h/Encapsulation/xinlang_news_fetcher.py
 ```
 
+**家债管理系统**
+```bash
+# 直接在浏览器中打开，或访问 GitHub Pages 在线版
+# 本地：open 04-Home-Debt/index.html
+# 在线：https://splendidzheng1.github.io/AI-Kit/04-Home-Debt/
+```
+
 ---
 
 ## 技术栈
@@ -101,6 +114,10 @@ AI-Kit/
 │   └── index.html
 ├── 03-Ai-Censor-Job/       # AI 审核工作流
 │   └── A_coze_workflow.py
+├── 04-Home-Debt/           # 家债管理系统（Vue 3 构建产物）
+│   ├── index.html
+│   ├── favicon.svg
+│   └── assets/
 ├── requirements.txt
 └── README.md
 ```
