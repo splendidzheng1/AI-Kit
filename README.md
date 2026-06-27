@@ -28,6 +28,12 @@
 - 📁 **源码**：`04-Home-Debt/source/`（完整 Vue 项目源码，含 router、views、data）
 - 🌐 **在线访问**：https://splendidzheng1.github.io/AI-Kit/04-Home-Debt/
 
+### 05-Leet-Code LeetCode 题解
+- LeetCode 算法题解答归档，共 36 题（35 道 TypeScript + 1 道 C++）
+- 涵盖树、链表、数组、字符串、动态规划、贪心、图/BFS 等常见题型
+- 文件命名格式：`题号.题目名称.语言后缀`（如 `2.两数相加.ts`、`3275.第-k-近障碍物查询.cpp`）
+- 📁 **源码**：`05-Leet-Code/`（原 LeetCode 仓库题解已归档至此）
+
 ### 00-Prompt AI 提示词库
 - SQL 语句生成、XPath 语句生成、VBA 程序生成等实用 Prompt
 - 职位评估 Prompt 模板
@@ -100,6 +106,7 @@ npm run build    # 构建到 source/dist，再覆盖到 04-Home-Debt/ 根目录
 | AI 平台 | Coze (cozepy) |
 | 前端可视化 | Vue 3, ECharts 5 |
 | 桌面 GUI | PyQt6, Pillow |
+| 算法题解 | TypeScript, C++ |
 
 ---
 
@@ -129,6 +136,10 @@ AI-Kit/
 │       ├── public/
 │       ├── package.json
 │       └── vite.config.js
+├── 05-Leet-Code/           # LeetCode 题解归档（36 题，TS/C++）
+│   ├── *.ts                # TypeScript 题解
+│   ├── *.cpp               # C++ 题解
+│   └── .gitattributes
 ├── requirements.txt
 └── README.md
 ```
