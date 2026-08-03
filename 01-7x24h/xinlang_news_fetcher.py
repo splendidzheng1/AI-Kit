@@ -288,6 +288,15 @@ class MiniNewsWindow(QWidget):
         # For dragging the frameless window
         self.old_pos = None
 
+        # Accept keyboard focus so ↑/↓ navigation works inside this window
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        # Auto-repeat timer for hold-to-scroll (buttons and arrow keys)
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(100)  # ms between repeats while held
+        self._auto_timer.timeout.connect(self._on_auto_repeat)
+        self._auto_action = None  # 'older' | 'newer'
+
         # The current news card displayed inside this mini window
         self.current_card = None
 
@@ -358,17 +367,27 @@ class MiniNewsWindow(QWidget):
 
         self.btn_up = QPushButton("▲")
         self.btn_up.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_up.setToolTip("上一条（更早）")
+        self.btn_up.setToolTip("上一条（更早）· 键盘 ↑ / 长按连翻")
         self.btn_up.setStyleSheet(nav_btn_style)
-        self.btn_up.clicked.connect(self.show_older)
+        self.btn_up.pressed.connect(lambda: self._start_auto('older'))
+        self.btn_up.released.connect(self._stop_auto)
         btn_layout.addWidget(self.btn_up)
 
         self.btn_down = QPushButton("▼")
         self.btn_down.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_down.setToolTip("下一条（更新）")
+        self.btn_down.setToolTip("下一条（更新）· 键盘 ↓ / 长按连翻")
         self.btn_down.setStyleSheet(nav_btn_style)
-        self.btn_down.clicked.connect(self.show_newer)
+        self.btn_down.pressed.connect(lambda: self._start_auto('newer'))
+        self.btn_down.released.connect(self._stop_auto)
         btn_layout.addWidget(self.btn_down)
+
+        # Jump straight back to the newest item
+        self.btn_latest = QPushButton("最新")
+        self.btn_latest.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_latest.setToolTip("一键回到最新一条")
+        self.btn_latest.setStyleSheet(nav_btn_style)
+        self.btn_latest.clicked.connect(self.show_latest)
+        btn_layout.addWidget(self.btn_latest)
 
         btn_return = QPushButton("返回正常模式")
         btn_return.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -407,8 +426,9 @@ class MiniNewsWindow(QWidget):
     # ------------------------------------------------------------------ #
 
     def enterEvent(self, event):
-        """When the mouse enters, make the window fully opaque."""
+        """When the mouse enters, make the window fully opaque and grab keyboard focus."""
         self.setWindowOpacity(1.0)
+        self.setFocus()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -501,6 +521,61 @@ class MiniNewsWindow(QWidget):
             self.current_index -= 1
             self._display_at_index()
 
+    def show_latest(self):
+        """Jump straight back to the newest news item (index 0)."""
+        if self.news_history:
+            self.current_index = 0
+            self._display_at_index()
+
+    # ------------------------------------------------------------------ #
+    #  Hold-to-repeat navigation (buttons & arrow keys)                   #
+    # ------------------------------------------------------------------ #
+
+    def _start_auto(self, action):
+        """Begin hold-to-scroll for ``action`` ('older' or 'newer')."""
+        if self._auto_action == action and self._auto_timer.isActive():
+            return
+        self._auto_action = action
+        self._auto_step()          # fire once immediately
+        self._auto_timer.start()   # then keep repeating every 100ms
+
+    def _stop_auto(self):
+        """Stop the hold-to-scroll repeat loop."""
+        self._auto_timer.stop()
+        self._auto_action = None
+
+    def _on_auto_repeat(self):
+        """Timer tick while a button/arrow key is held down."""
+        self._auto_step()
+
+    def _auto_step(self):
+        """Perform one navigation step for the current auto action."""
+        if self._auto_action == 'older':
+            self.show_older()
+        elif self._auto_action == 'newer':
+            self.show_newer()
+
+    # ------------------------------------------------------------------ #
+    #  Keyboard navigation (↑ / ↓)                                        #
+    # ------------------------------------------------------------------ #
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Up:
+            self._start_auto('older')
+            event.accept()
+        elif event.key() == Qt.Key.Key_Down:
+            self._start_auto('newer')
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            self._stop_auto()
+            event.accept()
+        else:
+            super().keyReleaseEvent(event)
+
     def _display_at_index(self):
         """Render the news card at ``self.current_index``."""
         if not (0 <= self.current_index < len(self.news_history)):
@@ -522,11 +597,12 @@ class MiniNewsWindow(QWidget):
         self._update_nav_buttons()
 
     def _update_nav_buttons(self):
-        """Enable/disable the up/down buttons based on the current index."""
+        """Enable/disable the up/down/latest buttons based on the current index."""
         has_older = self.current_index < len(self.news_history) - 1
         has_newer = self.current_index > 0
         self.btn_up.setEnabled(has_older)
         self.btn_down.setEnabled(has_newer)
+        self.btn_latest.setEnabled(has_newer)  # same condition as "has newer"
 
     # ------------------------------------------------------------------ #
     #  Positioning                                                        #
