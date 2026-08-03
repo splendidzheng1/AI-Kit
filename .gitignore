@@ -20,12 +20,13 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# 01-7x24h — PyInstaller 中间构建文件
+# 01-7x24h — PyInstaller 中间构建文件与产物（产物由 GitHub Actions 自动构建）
 01-7x24h/build/
 01-7x24h/build_v*/
 01-7x24h/dist_v*/
 01-7x24h/build_ci/
 01-7x24h/dist_ci/
+01-7x24h/dist/
 
 # 02-Job-Tool/C-Agent — 本地 API 密钥
 02-Job-Tool/C-Agent/.env
