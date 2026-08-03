@@ -57,3 +57,36 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: 01-7x24h/dist_ci/XinlangNews-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate release tag
+        id: tag
+        run: |
+          echo "tag_name=v$(date +'%Y%m%d-%H%M%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: XinlangNews ${{ steps.tag.outputs.tag_name }}
+          body: |
+            ## 自动构建产物
+
+            - 触发：push 到 main（源码/构建配置变更）或手动 Run workflow
+            - 平台：Windows x64 / macOS
+
+            ### 使用说明
+            - **Windows**：下载 `XinlangNews-Windows.exe` 直接运行
+            - **macOS**：下载 `XinlangNews-macOS`，首次运行需在「系统设置 → 隐私与安全 → 辅助功能」中授权（全局热键 Shift+Space 需要）
+          files: artifacts/*/*
+          fail_on_unmatched_files: true
