@@ -6,6 +6,9 @@ __pycache__/
 env/
 venv/
 
+# Node
+node_modules/
+
 # Environment
 .env
 
@@ -19,6 +22,10 @@ Thumbs.db
 
 # 01-7x24h — PyInstaller 中间构建文件
 01-7x24h/build/
+01-7x24h/build_v*/
+01-7x24h/dist_v*/
+01-7x24h/build_ci/
+01-7x24h/dist_ci/
 
-# 03-Ai-Censor-Job/C-Agent — 本地 API 密钥
-03-Ai-Censor-Job/C-Agent/.env
+# 02-Job-Tool/C-Agent — 本地 API 密钥
+02-Job-Tool/C-Agent/.env
