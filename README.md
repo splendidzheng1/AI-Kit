@@ -10,7 +10,6 @@
 - ⚠️ **额外依赖**：`PyQt6`、`Pillow`、`keyboard`（见下方依赖说明）
 - ⚠️ **平台限制**：`keyboard` 库在 macOS 上需要辅助功能权限；Windows 上某些安全软件可能拦截全局热键
 - 自动去重机制，最大卡片数可配置（默认 1000），抓取间隔可配置（默认 600s，最低 10s）
-- 🔧 **CI 构建**：GitHub Actions 自动构建 Windows + macOS 双平台产物（见 Actions 标签页）
 
 ### 02-Job-Tool 工作评估系统
 - **雷达图评估工具** — 基于 Vue 3 + ECharts 5，支持自定义评估维度（福利待遇、通勤、发展、团队氛围等），多份工作多维度对比评分，浏览器直接打开即可使用
@@ -30,6 +29,14 @@
 - 涵盖树、链表、数组、字符串、动态规划、贪心、图/BFS 等常见题型
 - 文件命名格式：`题号.题目名称.语言后缀`（如 `2.两数相加.ts`、`3275.第-k-近障碍物查询.cpp`）
 - 📁 **源码**：`04-Leet-Code/`（原 LeetCode 仓库题解已归档至此）
+
+### 05-WeChat-Auto 微信单删检测 / 按名单清理
+- 基于 **uiautomator2** 的安卓微信自动化工具（原项目代号 `B-UiAutomation`）
+- 用 ¥0.01 转账探测找出疑似单删好友（不输入支付密码），并可按名单批量删除
+- 三种模式：`smoke`（连接自检）、`scan`（转账探测生成名单）、`purge`（按名单删除）、`clear`（清空记录）
+- ⚠️ **平台限制**：需 Windows + Python 3.10+ + USB 调试的安卓手机；操作涉及真实微信界面与好友关系，请自担风控与误删风险
+- ⚠️ **隐私**：`data/`（单删名单、删除结果等）与 `screenshots/` 含个人数据，已加入 `.gitignore` 绝不入库
+- 📁 **源码**：`05-WeChat-Auto/`
 
 ---
 
@@ -98,6 +105,7 @@ npm run build    # 构建到 source/dist，再覆盖到 03-Home-Debt/ 根目录
 | AI 平台 | Coze (cozepy) |
 | 前端可视化 | Vue 3, ECharts 5 |
 | 桌面 GUI | PyQt6, Pillow |
+| 移动端自动化 | uiautomator2, adbutils |
 | 算法题解 | TypeScript, C++ |
 
 ---
@@ -130,8 +138,18 @@ AI-Kit/
 │   ├── *.ts                # TypeScript 题解
 │   ├── *.cpp               # C++ 题解
 │   └── .gitattributes
-├── .github/workflows/      # GitHub Actions CI
-│   └── build-xinlang-news.yml  # Windows + macOS 双平台自动构建
+├── 05-WeChat-Auto/        # 微信单删检测 / 按名单清理（uiautomator2）
+│   ├── main.py            # 入口：smoke / scan / purge / clear 模式
+│   ├── detector.py        # 转账探测单删逻辑
+│   ├── device.py          # 设备/控件操作封装
+│   ├── config.py          # 配置
+│   ├── io_util.py         # IO 工具
+│   ├── log_util.py        # 日志工具
+│   ├── debug_ui.py        # 控件树调试
+│   ├── requirements.txt   # uiautomator2 / adbutils
+│   ├── tests/             # 测试（占位）
+│   ├── data/              # 运行产物（gitignore）
+│   └── screenshots/       # 截图（gitignore）
 ├── requirements.txt
 └── README.md
 ```

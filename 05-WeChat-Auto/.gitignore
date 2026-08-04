@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.idea/
+.vscode/
+*.log
+.DS_Store
+
+# 运行产物（含个人数据：单删名单、删除结果等，绝不入库）
+data/
+screenshots/
+*.png
+*.csv
