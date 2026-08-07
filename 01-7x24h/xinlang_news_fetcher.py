@@ -491,17 +491,46 @@ class MiniNewsWindow(QWidget):
             news_data: A dict containing the keys ``id``, ``time``,
                         ``rich_text``, ``images``, ``source``, etc.
         """
-        if news_data is None:
+        self.add_news_batch([news_data])
+
+    def add_news_batch(self, news_list):
+        """Receive multiple new items at once and merge them into history.
+
+        ``news_list`` is expected to be in **ascending** time order
+        (oldest first, newest last) — the same order the fetcher emits.
+        Items are deduplicated against the existing history, then
+        inserted at the front so the newest ends up at index 0.
+
+        Args:
+            news_list: A list of news dicts (ascending time order).
+        """
+        if not news_list:
             return
 
-        # Deduplicate: skip if this exact item is already at the front
-        news_id = news_data.get('id')
-        if self.news_history and self.news_history[0].get('id') == news_id:
-            self.current_index = 0
-            self._display_at_index()
+        # Filter out None entries (e.g. from update_news(None) calls)
+        news_list = [n for n in news_list if n is not None]
+        if not news_list:
             return
 
-        self.news_history.insert(0, news_data)
+        existing_ids = {n.get('id') for n in self.news_history}
+        to_add = [n for n in news_list if n.get('id') not in existing_ids]
+        if not to_add:
+            # All items already known — do NOT reset the display position.
+            # This allows entering mini mode without losing the user's
+            # current browsing position.
+            return
+
+        # Insert in ascending order (oldest first). Each insert(0, ...)
+        # pushes previous items down, so the last (newest) ends up at
+        # index 0 — which is exactly what we want.
+        for news in to_add:
+            self.news_history.insert(0, news)
+
+        # Cap history to prevent unbounded growth (match main window limit)
+        max_history = 1000
+        if len(self.news_history) > max_history:
+            self.news_history = self.news_history[:max_history]
+
         self.current_index = 0
         self._display_at_index()
 
@@ -1384,8 +1413,15 @@ class MainWindow(QMainWindow):
             return
         self.mini_mode_active = True
         self.hide()
-        # Collect existing news from the main window's cards (newest first,
-        # since insertWidget(0, ...) puts the newest at the top).
+        # Merge the main window's current news into the mini window's
+        # history.  We use add_news_batch (merge + dedup) instead of
+        # set_news_history (replace) so that:
+        #   1. Items the mini window already has are not lost.
+        #   2. The user's browsing position (current_index) is preserved
+        #      when there is nothing new to add.
+        # existing_news is newest-first (top-to-bottom in the layout),
+        # but add_news_batch expects ascending (oldest-first) order, so
+        # we reverse it.
         existing_news = []
         for i in range(self.news_layout.count()):
             item = self.news_layout.itemAt(i)
@@ -1394,9 +1430,13 @@ class MainWindow(QMainWindow):
                 if widget is not None and hasattr(widget, 'news_data'):
                     existing_news.append(widget.news_data)
         if existing_news:
-            self.mini_window.set_news_history(existing_news)
+            self.mini_window.add_news_batch(list(reversed(existing_news)))
         elif self.latest_news is not None:
             self.mini_window.update_news(self.latest_news)
+        # Ensure the mini window shows something even if no news has
+        # arrived yet.
+        if not self.mini_window.news_history:
+            self.mini_window._update_nav_buttons()
         self.mini_window.show()
 
     def exit_mini_mode(self):
@@ -1442,9 +1482,11 @@ class MainWindow(QMainWindow):
         # so the last element is the newest.
         if news_list:
             self.latest_news = news_list[-1]
-            # If mini mode is active, update the mini window immediately
+            # If mini mode is active, push ALL new items to the mini
+            # window (not just the latest) so the history is complete
+            # and the user can navigate through every item.
             if self.mini_mode_active:
-                self.mini_window.update_news(self.latest_news)
+                self.mini_window.add_news_batch(news_list)
         
         # Limit the number of cards: remove oldest (bottom) when exceeding max_cards
         while self.news_layout.count() > self.max_cards:
