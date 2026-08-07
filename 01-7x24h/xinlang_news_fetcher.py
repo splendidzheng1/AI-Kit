@@ -291,9 +291,19 @@ class MiniNewsWindow(QWidget):
         # Accept keyboard focus so ↑/↓ navigation works inside this window
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # Auto-repeat timer for hold-to-scroll (buttons and arrow keys)
+        # Auto-repeat timer for hold-to-scroll (buttons and arrow keys).
+        # We use TWO timers so a quick click only flips ONE item, and a
+        # long press waits for ``_initial_delay`` before the repeat kicks
+        # in at ``_repeat_interval`` ms intervals. Without the initial
+        # delay, even a brief tap (e.g. an accidental press) would
+        # immediately start repeating, which felt too twitchy.
+        self._initial_delay = QTimer(self)
+        self._initial_delay.setSingleShot(True)
+        self._initial_delay.setInterval(400)  # ms before repeat begins
+        self._initial_delay.timeout.connect(self._begin_repeat)
+
         self._auto_timer = QTimer(self)
-        self._auto_timer.setInterval(100)  # ms between repeats while held
+        self._auto_timer.setInterval(250)  # ms between repeats while held
         self._auto_timer.timeout.connect(self._on_auto_repeat)
         self._auto_action = None  # 'older' | 'newer'
 
@@ -532,17 +542,31 @@ class MiniNewsWindow(QWidget):
     # ------------------------------------------------------------------ #
 
     def _start_auto(self, action):
-        """Begin hold-to-scroll for ``action`` ('older' or 'newer')."""
-        if self._auto_action == action and self._auto_timer.isActive():
+        """Begin hold-to-scroll for ``action`` ('older' or 'newer').
+
+        A single tap fires one navigation step immediately. If the
+        button/key is still held when ``_initial_delay`` expires,
+        ``_begin_repeat`` kicks off the periodic repeat loop.
+        """
+        if self._auto_action == action and (self._initial_delay.isActive() or self._auto_timer.isActive()):
             return
         self._auto_action = action
-        self._auto_step()          # fire once immediately
-        self._auto_timer.start()   # then keep repeating every 100ms
+        self._auto_step()              # one step on press (handles single click)
+        self._auto_timer.stop()        # ensure clean state
+        self._initial_delay.start()    # arm the long-press timer
 
     def _stop_auto(self):
         """Stop the hold-to-scroll repeat loop."""
+        self._initial_delay.stop()
         self._auto_timer.stop()
         self._auto_action = None
+
+    def _begin_repeat(self):
+        """Initial-delay elapsed; start the periodic repeat timer."""
+        # Guard against the case where the action was switched (e.g.
+        # opposite direction pressed) between press and timeout.
+        if self._auto_action is not None and not self._auto_timer.isActive():
+            self._auto_timer.start()
 
     def _on_auto_repeat(self):
         """Timer tick while a button/arrow key is held down."""
@@ -927,13 +951,60 @@ class MainWindow(QMainWindow):
         # Connect the signal to the toggle slot
         self.toggle_visibility_signal.connect(self.toggle_window_visibility)
         self.last_toggle_time = 0
-        
+        # Whether the global hotkey is currently registered with the
+        # ``keyboard`` library. We track this so focus events can
+        # temporarily suspend the hotkey (e.g. while typing a search
+        # query that contains a space) without losing the registration.
+        self._global_hotkey_active = False
+
         # Register the hotkey using keyboard library
         # We use a lambda to emit the signal because keyboard runs in a separate thread
         try:
             keyboard.add_hotkey(GLOBAL_HOTKEY, self.toggle_visibility_signal.emit)
+            self._global_hotkey_active = True
         except Exception as e:
             print(f"Failed to register global hotkey: {e}")
+
+    def suspend_global_hotkey(self):
+        """Temporarily remove the shift+space global hotkey.
+
+        Used while the search input has focus, so the user can type
+        spaces (and ``shift+space``) freely without the window
+        toggling its visibility.
+        """
+        if not self._global_hotkey_active:
+            return
+        try:
+            keyboard.remove_hotkey(GLOBAL_HOTKEY)
+            self._global_hotkey_active = False
+        except Exception as e:
+            print(f"Failed to suspend global hotkey: {e}")
+
+    def resume_global_hotkey(self):
+        """Re-register the shift+space global hotkey after a suspend."""
+        if self._global_hotkey_active:
+            return
+        try:
+            keyboard.add_hotkey(GLOBAL_HOTKEY, self.toggle_visibility_signal.emit)
+            self._global_hotkey_active = True
+        except Exception as e:
+            print(f"Failed to resume global hotkey: {e}")
+
+    def eventFilter(self, obj, event):
+        """Intercept focus events on the search input.
+
+        QLineEdit does not expose ``focusIn`` / ``focusOut`` signals
+        (only the protected ``focusInEvent`` / ``focusOutEvent`` hooks).
+        We install this filter on the search box so we can suspend the
+        global hotkey while the user is typing a query.
+        """
+        if obj is getattr(self, 'search_input', None):
+            etype = event.type()
+            if etype == QEvent.Type.FocusIn:
+                self.suspend_global_hotkey()
+            elif etype == QEvent.Type.FocusOut:
+                self.resume_global_hotkey()
+        return super().eventFilter(obj, event)
 
     def toggle_window_visibility(self):
         # Simple debounce to prevent double triggering
@@ -1012,6 +1083,12 @@ class MainWindow(QMainWindow):
         """)
         # Trigger search only on Enter
         self.search_input.returnPressed.connect(lambda: self.perform_search(self.search_input.text()))
+        # Suspend the global shift+space hotkey while typing in the search
+        # box, otherwise pressing space (or shift+space) inside a query
+        # would toggle the window's visibility and interrupt input.
+        # QLineEdit has no focusIn/focusOut signals, so we intercept the
+        # underlying focus events via an event filter.
+        self.search_input.installEventFilter(self)
         
         # Navigation Buttons
         btn_style = """
@@ -1154,9 +1231,10 @@ class MainWindow(QMainWindow):
         # Keep close button at top-right corner
         if hasattr(self, 'close_btn'):
             self.close_btn.move(self.width() - 35, 5)
-        # Keep mini mode button just left of the close button
+        # Keep mini mode button directly below the close button, so it
+        # no longer overlaps the search input on the right side.
         if hasattr(self, 'mini_btn'):
-            self.mini_btn.move(self.width() - 70, 5)
+            self.mini_btn.move(self.width() - 35, 40)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1449,6 +1527,16 @@ class MainWindow(QMainWindow):
         self.highlight_current_match()
 
 def main():
+    # In PyInstaller windowed mode (console=False), sys.stdout and
+    # sys.stderr are None. Any print() call (e.g. inside except blocks)
+    # would then raise AttributeError and crash the app. Redirect them
+    # to os.devnull so print() becomes a silent no-op.
+    import os as _os
+    if sys.stdout is None:
+        sys.stdout = open(_os.devnull, 'w', encoding='utf-8', errors='replace')
+    if sys.stderr is None:
+        sys.stderr = open(_os.devnull, 'w', encoding='utf-8', errors='replace')
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Important for tray app
 
