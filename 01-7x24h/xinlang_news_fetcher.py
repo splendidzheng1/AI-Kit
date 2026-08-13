@@ -1413,30 +1413,8 @@ class MainWindow(QMainWindow):
             return
         self.mini_mode_active = True
         self.hide()
-        # Merge the main window's current news into the mini window's
-        # history.  We use add_news_batch (merge + dedup) instead of
-        # set_news_history (replace) so that:
-        #   1. Items the mini window already has are not lost.
-        #   2. The user's browsing position (current_index) is preserved
-        #      when there is nothing new to add.
-        # existing_news is newest-first (top-to-bottom in the layout),
-        # but add_news_batch expects ascending (oldest-first) order, so
-        # we reverse it.
-        existing_news = []
-        for i in range(self.news_layout.count()):
-            item = self.news_layout.itemAt(i)
-            if item is not None:
-                widget = item.widget()
-                if widget is not None and hasattr(widget, 'news_data'):
-                    existing_news.append(widget.news_data)
-        if existing_news:
-            self.mini_window.add_news_batch(list(reversed(existing_news)))
-        elif self.latest_news is not None:
-            self.mini_window.update_news(self.latest_news)
-        # Ensure the mini window shows something even if no news has
-        # arrived yet.
-        if not self.mini_window.news_history:
-            self.mini_window._update_nav_buttons()
+        # The mini window's news_history is always kept in sync by
+        # add_news(), so no manual sync is needed here.
         self.mini_window.show()
 
     def exit_mini_mode(self):
@@ -1482,11 +1460,10 @@ class MainWindow(QMainWindow):
         # so the last element is the newest.
         if news_list:
             self.latest_news = news_list[-1]
-            # If mini mode is active, push ALL new items to the mini
-            # window (not just the latest) so the history is complete
-            # and the user can navigate through every item.
-            if self.mini_mode_active:
-                self.mini_window.add_news_batch(news_list)
+            # Always forward ALL new items to the mini window so its
+            # history stays in sync with the main window regardless of
+            # which mode is currently active.
+            self.mini_window.add_news_batch(news_list)
         
         # Limit the number of cards: remove oldest (bottom) when exceeding max_cards
         while self.news_layout.count() > self.max_cards:
