@@ -4,8 +4,9 @@ import ctypes
 from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QLabel, QScrollArea, QFrame, QSystemTrayIcon, QMenu, QPushButton, QSizePolicy, QTextEdit,
-                             QDialog, QSpinBox, QDoubleSpinBox, QAbstractSpinBox)
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize, QEvent, QSettings
+                             QDialog, QSpinBox, QDoubleSpinBox, QAbstractSpinBox,
+                             QStackedWidget, QListWidget, QListWidgetItem)
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize, QEvent, QSettings, QPointF
 from PyQt6.QtGui import QIcon, QFont, QAction, QPixmap, QPainter, QColor, QKeySequence, QShortcut
 from PIL import Image, ImageDraw
 import io
@@ -22,6 +23,22 @@ GLOBAL_HOTKEY = 'shift+space'
 # (internally clamped to 0.01 minimum for Windows event compatibility).
 # Adjust this value to change the default transparency of mini mode.
 MINI_MODE_DEFAULT_OPACITY = 0.0
+
+# ──────────────────────────────────────────────────────────────────── #
+#  价格盯盘品种配置                                                      #
+# ──────────────────────────────────────────────────────────────────── #
+INSTRUMENTS = [
+    {"code": "hf_GC",       "name": "COMEX黄金",  "category": "futures", "decimals": 2},
+    {"code": "hf_CL",       "name": "WTI原油",    "category": "futures", "decimals": 2},
+    {"code": "s_sh000001",  "name": "上证指数",    "category": "s_index", "decimals": 2},
+    {"code": "s_sz399001",  "name": "深证成指",    "category": "s_index", "decimals": 2},
+    {"code": "int_nikkei",  "name": "日经指数",    "category": "global",  "decimals": 2},
+    {"code": "fx_susdcny",  "name": "美元人民币",  "category": "fx",      "decimals": 4},
+    {"code": "fx_susdjpy",  "name": "美元日元",    "category": "fx",      "decimals": 4},
+    {"code": "hf_CAD",      "name": "伦铜",        "category": "futures", "decimals": 2},
+    {"code": "hf_AHD",      "name": "伦铝",        "category": "futures", "decimals": 2},
+]
+INST_BY_CODE = {inst["code"]: inst for inst in INSTRUMENTS}
 
 class NewsFetcherThread(QThread):
     news_updated = pyqtSignal(list)
@@ -113,7 +130,245 @@ class NewsFetcherThread(QThread):
         self.running = False
         self.wait()
 
+
+# ════════════════════════════════════════════════════════════════════ #
+#  价格盯盘组件                                                          #
+# ════════════════════════════════════════════════════════════════════ #
+
+class PriceFetcherThread(QThread):
+    """后台线程：定时从新浪财经拉取 9 个品种实时价格（单次 HTTP 请求）。"""
+
+    prices_updated = pyqtSignal(dict)
+
+    def __init__(self, interval=5):
+        super().__init__()
+        self.interval = interval
+        self.running = True
+        self.headers = {"Referer": "https://finance.sina.com.cn/"}
+
+    def run(self):
+        while self.running:
+            try:
+                data = self._fetch_prices()
+                if data:
+                    self.prices_updated.emit(data)
+            except Exception as e:
+                print(f"Price fetch error: {e}")
+
+            for _ in range(self.interval):
+                if not self.running:
+                    return
+                self.msleep(1000)
+
+    def _fetch_prices(self):
+        codes = ",".join(inst["code"] for inst in INSTRUMENTS)
+        url = f"http://hq.sinajs.cn/list={codes}"
+        try:
+            resp = requests.get(url, headers=self.headers, timeout=10)
+            resp.encoding = "gbk"
+            return self._parse_response(resp.text)
+        except:
+            return {}
+
+    def _parse_response(self, text):
+        result = {}
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line or "var hq_str_" not in line:
+                continue
+            try:
+                rest = line[len("var hq_str_"):]
+                code, _, data_str = rest.partition("=")
+                code = code.strip()
+                data_str = data_str.strip().strip('";')
+                if not data_str:
+                    continue
+                fields = data_str.split(",")
+                parsed = self._parse_by_category(code, fields)
+                if parsed:
+                    result[code] = parsed
+            except:
+                continue
+        return result
+
+    def _parse_by_category(self, code, fields):
+        inst = INST_BY_CODE.get(code)
+        if not inst:
+            return None
+        cat = inst["category"]
+        try:
+            if cat == "futures":
+                price = float(fields[0]) if fields[0] else None
+                prev_close = float(fields[7]) if len(fields) > 7 and fields[7] else None
+                name = fields[13] if len(fields) > 13 else inst["name"]
+                change_pct = None
+                if price and prev_close and prev_close > 0:
+                    change_pct = (price - prev_close) / prev_close * 100
+                return {"price": price, "change_pct": change_pct, "name": name, "timestamp": datetime.now()}
+
+            elif cat in ("s_index", "global"):
+                name = fields[0] if fields else inst["name"]
+                price = float(fields[1]) if len(fields) > 1 and fields[1] else None
+                change_pct = float(fields[3]) if len(fields) > 3 and fields[3] else None
+                return {"price": price, "change_pct": change_pct, "name": name, "timestamp": datetime.now()}
+
+            elif cat == "fx":
+                price = float(fields[1]) if len(fields) > 1 and fields[1] else None
+                name = fields[9] if len(fields) > 9 else inst["name"]
+                return {"price": price, "change_pct": None, "name": name, "timestamp": datetime.now()}
+        except (ValueError, IndexError):
+            return None
+        return None
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+
+class SparklineWidget(QWidget):
+    """用 QPainter 画 polyline 折线图，涨红跌绿着色。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._points = []
+        self.setMinimumHeight(25)
+
+    def set_points(self, points):
+        self._points = list(points) if points else []
+        self.update()
+
+    def paintEvent(self, event):
+        if len(self._points) < 2:
+            return
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            w = self.width()
+            h = self.height()
+            if w <= 0 or h <= 0:
+                return
+            pmin = min(self._points)
+            pmax = max(self._points)
+            prange = pmax - pmin if pmax > pmin else 1
+
+            # 涨红跌绿（中国习惯）
+            if self._points[-1] > self._points[0]:
+                color = QColor(255, 68, 68)
+            elif self._points[-1] < self._points[0]:
+                color = QColor(0, 204, 102)
+            else:
+                color = QColor(136, 136, 136)
+
+            pen = painter.pen()
+            pen.setColor(color)
+            pen.setWidthF(1.5)  # PyQt6 的 setWidth 只接受 int，传 float 会抛异常导致折线画不出来
+            painter.setPen(pen)
+
+            n = len(self._points)
+            pts = []
+            for i, p in enumerate(self._points):
+                x = (i / (n - 1)) * w if n > 1 else 0
+                y = h - ((p - pmin) / prange) * (h - 4) - 2
+                pts.append(QPointF(x, y))
+            for i in range(len(pts) - 1):
+                painter.drawLine(pts[i], pts[i + 1])
+            painter.end()
+        except Exception as e:
+            print(f"Sparkline paintEvent error: {e}")
+
+
+class PriceCard(QFrame):
+    """单个品种卡片，分四区：①名称 ④涨跌幅 ②价格 ③折线图。"""
+
+    def __init__(self, inst, node_count=30, parent=None):
+        super().__init__(parent)
+        self.inst = inst
+        self.node_count = node_count
+        self.data_history = []  # [(timestamp, price, change_pct), ...] — 存全部历史
+
+        self.setFixedSize(128, 95)
+        # 卡片底色比外框 (#1e1e1e) 略亮，形成轻微浮起的层次感；
+        # 涨跌文字与折线图统一使用红涨绿跌，保持色彩和谐
+        self.setStyleSheet("""
+            PriceCard {
+                background-color: #242424;
+                border: 1px solid #3a3a3a;
+                border-radius: 6px;
+            }
+            PriceCard:hover {
+                border: 1px solid #4a4a4a;
+                background-color: #282828;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
+
+        # ① 名称(左) + ④ 涨跌幅(右)
+        top_row = QHBoxLayout()
+        self.lbl_name = QLabel(inst["name"])
+        self.lbl_name.setStyleSheet("color: #ccc; font-size: 11px; font-weight: bold;")
+        top_row.addWidget(self.lbl_name)
+        top_row.addStretch()
+        self.lbl_change = QLabel("--")
+        self.lbl_change.setStyleSheet("color: #888; font-size: 10px; font-weight: bold;")
+        top_row.addWidget(self.lbl_change)
+        layout.addLayout(top_row)
+
+        # ② 价格（中央大字）
+        self.lbl_price = QLabel("--")
+        self.lbl_price.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_price.setStyleSheet("color: #fff; font-size: 16px; font-weight: bold;")
+        layout.addWidget(self.lbl_price)
+
+        # ③ 折线图
+        self.spark = SparklineWidget()
+        self.spark.setFixedHeight(28)
+        layout.addWidget(self.spark)
+
+    def update_price(self, data):
+        price = data.get("price")
+        change = data.get("change_pct")
+        ts = data.get("timestamp", datetime.now())
+
+        if price is not None:
+            dec = self.inst.get("decimals", 2)
+            self.lbl_price.setText(f"{price:.{dec}f}")
+
+        # FX 无直接涨跌幅 → 从历史首点自算
+        if change is None and price is not None and len(self.data_history) >= 1:
+            first_price = self.data_history[0][1]
+            if first_price and first_price > 0:
+                change = (price - first_price) / first_price * 100
+
+        if change is not None:
+            if change > 0:
+                color = "#ff4444"
+                sign = "+"
+            elif change < 0:
+                color = "#00cc66"
+                sign = ""
+            else:
+                color = "#888"
+                sign = ""
+            self.lbl_change.setText(f"{sign}{change:.2f}%")
+            self.lbl_change.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: bold;")
+
+        self.data_history.append((ts, price, change))
+        recent = [p for _, p, _ in self.data_history[-self.node_count:] if p is not None]
+        self.spark.set_points(recent)
+
+    def set_node_count(self, n):
+        self.node_count = n
+        recent = [p for _, p, _ in self.data_history[-n:] if p is not None]
+        self.spark.set_points(recent)
+
+
 class AutoHeightTextEdit(QTextEdit):
+    """QTextEdit that auto-grows to fit content and emits ctrl_clicked on Ctrl+Click."""
+
     ctrl_clicked = pyqtSignal()
 
     def __init__(self, text, parent=None):
@@ -258,6 +513,25 @@ class NewsCard(QFrame):
         return (text in self.news_data.get('rich_text', '').lower() or 
                 text in self.news_data.get('time', '').lower())
 
+class HorizontalWheelScrollArea(QScrollArea):
+    """把竖向滚轮增量映射到横向滚动条的滚动区域（用于盯盘卡片视图）。
+
+    滚轮向上 → 向左翻看更早的卡片，滚轮向下 → 向右翻看后面的卡片；
+    触控板的小步进增量同样适用（按像素平滑滚动）。
+    """
+
+    def wheelEvent(self, event):
+        bar = self.horizontalScrollBar()
+        delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.angleDelta().x()
+        if bar is not None and delta != 0:
+            bar.setValue(bar.value() - delta)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+
 class MiniNewsWindow(QWidget):
     """Mini floating window that shows only the latest news item.
 
@@ -315,6 +589,22 @@ class MiniNewsWindow(QWidget):
         self.news_history = []
         self.current_index = 0
 
+        # Price monitoring state
+        self.price_cards = {}
+        self.price_data = {}
+        self.current_view = 0  # 0=news, 1=price
+        self._news_size = (400, 180)
+        # Price view uses the SAME size as news view — cards scroll horizontally
+
+        settings = QSettings()
+        self.price_interval = settings.value("price_interval", 5, type=int)
+        self.price_node_count = settings.value("price_node_count", 30, type=int)
+        saved_order_str = settings.value("price_card_order", "", type=str)
+        if saved_order_str:
+            self.price_card_order = saved_order_str.split(",")
+        else:
+            self.price_card_order = [i["code"] for i in INSTRUMENTS]
+
         # Build the UI
         self.setup_ui()
 
@@ -331,15 +621,76 @@ class MiniNewsWindow(QWidget):
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(2)
 
-        # Container that holds the NewsCard (re-created on every update).
-        # Stretch=1 so it fills all space above the button bar, keeping the
-        # button bar pinned to the bottom regardless of card content height.
+        # ── Stacked widget: page 0 = news, page 1 = price cards ──
+        self.stacked = QStackedWidget()
+
+        # --- Page 0: News view ---
+        self.news_page = QWidget()
+        news_layout = QVBoxLayout(self.news_page)
+        news_layout.setContentsMargins(0, 0, 0, 0)
+        news_layout.setSpacing(0)
+
         self.card_container = QWidget()
         self.card_container.setStyleSheet("background-color: transparent;")
         self.card_layout = QVBoxLayout(self.card_container)
         self.card_layout.setContentsMargins(0, 0, 0, 0)
         self.card_layout.setSpacing(0)
-        main_layout.addWidget(self.card_container, 1)
+        news_layout.addWidget(self.card_container, 1)
+        self.stacked.addWidget(self.news_page)
+
+        # --- Page 1: Price cards view (cards inside an outer frame) ---
+        self.price_page = QWidget()
+        price_layout = QVBoxLayout(self.price_page)
+        price_layout.setContentsMargins(0, 0, 0, 0)
+        price_layout.setSpacing(0)
+
+        # 外框容器：与新闻视图的 NewsCard 保持同一套视觉框架，
+        # 卡片视图嵌在这个外框内部，切换视图时整体轮廓保持一致
+        self.price_frame = QFrame()
+        self.price_frame.setObjectName("PriceFrame")
+        self.price_frame.setStyleSheet("""
+            QFrame#PriceFrame {
+                background-color: #1e1e1e;
+                border: 1px solid #333;
+                border-radius: 8px;
+            }
+        """)
+        frame_layout = QVBoxLayout(self.price_frame)
+        frame_layout.setContentsMargins(6, 6, 6, 6)
+        frame_layout.setSpacing(0)
+
+        self.price_scroll = HorizontalWheelScrollArea()
+        self.price_scroll.setWidgetResizable(True)
+        self.price_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.price_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.price_scroll.setFrameStyle(QFrame.Shape.NoFrame)
+        self.price_scroll.setStyleSheet("""
+            QScrollArea { background-color: transparent; border: none; }
+            QScrollBar:horizontal { border: none; background: #2d2d2d; height: 6px; margin: 0; border-radius: 3px; }
+            QScrollBar::handle:horizontal { background: #555; min-width: 20px; border-radius: 3px; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }
+        """)
+
+        self.cards_container = QWidget()
+        self.cards_container.setStyleSheet("background-color: transparent;")
+        self.cards_layout = QHBoxLayout(self.cards_container)
+        self.cards_layout.setContentsMargins(2, 4, 2, 4)
+        self.cards_layout.setSpacing(6)
+
+        for code in self.price_card_order:
+            inst = INST_BY_CODE.get(code)
+            if inst:
+                card = PriceCard(inst, self.price_node_count)
+                self.price_cards[code] = card
+                self.cards_layout.addWidget(card)
+        self.cards_layout.addStretch(1)
+
+        self.price_scroll.setWidget(self.cards_container)
+        frame_layout.addWidget(self.price_scroll)
+        price_layout.addWidget(self.price_frame)
+        self.stacked.addWidget(self.price_page)
+
+        main_layout.addWidget(self.stacked, 1)
 
         # Small return-to-normal-mode button at the bottom-right
         btn_bar = QWidget()
@@ -399,6 +750,13 @@ class MiniNewsWindow(QWidget):
         self.btn_latest.clicked.connect(self.show_latest)
         btn_layout.addWidget(self.btn_latest)
 
+        # View toggle button
+        self.btn_watch = QPushButton("实时盯盘")
+        self.btn_watch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_watch.setStyleSheet(nav_btn_style)
+        self.btn_watch.clicked.connect(self.toggle_view)
+        btn_layout.addWidget(self.btn_watch)
+
         btn_return = QPushButton("返回正常模式")
         btn_return.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_return.setStyleSheet("""
@@ -451,18 +809,27 @@ class MiniNewsWindow(QWidget):
     # ------------------------------------------------------------------ #
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.old_pos = event.globalPosition().toPoint()
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.old_pos = event.globalPosition().toPoint()
+        except Exception as e:
+            print(f"mousePressEvent error: {e}")
 
     def mouseMoveEvent(self, event):
-        if self.old_pos:
-            delta = event.globalPosition().toPoint() - self.old_pos
-            self.move(self.pos() + delta)
-            self.old_pos = event.globalPosition().toPoint()
+        try:
+            if self.old_pos:
+                delta = event.globalPosition().toPoint() - self.old_pos
+                self.move(self.pos() + delta)
+                self.old_pos = event.globalPosition().toPoint()
+        except Exception as e:
+            print(f"mouseMoveEvent error: {e}")
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.old_pos = None
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.old_pos = None
+        except Exception as e:
+            print(f"mouseReleaseEvent error: {e}")
 
     # ------------------------------------------------------------------ #
     #  Context menu for returning to normal mode                         #
@@ -613,17 +980,21 @@ class MiniNewsWindow(QWidget):
     # ------------------------------------------------------------------ #
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Up:
-            self._start_auto('older')
-            event.accept()
-        elif event.key() == Qt.Key.Key_Down:
-            self._start_auto('newer')
-            event.accept()
+        # Only handle ↑/↓ navigation in news view (page 0)
+        if self.current_view == 0:
+            if event.key() == Qt.Key.Key_Up:
+                self._start_auto('older')
+                event.accept()
+            elif event.key() == Qt.Key.Key_Down:
+                self._start_auto('newer')
+                event.accept()
+            else:
+                super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
-        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+        if self.current_view == 0 and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
             self._stop_auto()
             event.accept()
         else:
@@ -656,6 +1027,68 @@ class MiniNewsWindow(QWidget):
         self.btn_up.setEnabled(has_older)
         self.btn_down.setEnabled(has_newer)
         self.btn_latest.setEnabled(has_newer)  # same condition as "has newer"
+
+    # ------------------------------------------------------------------ #
+    #  Price view: toggle, update, settings                                #
+    # ------------------------------------------------------------------ #
+
+    def toggle_view(self):
+        """Switch between news view (page 0) and price card view (page 1).
+        Window size stays the same — cards scroll horizontally."""
+        try:
+            if self.current_view == 0:
+                self.current_view = 1
+                self.stacked.setCurrentIndex(1)
+                self.btn_watch.setText("快讯信息")
+                self.btn_up.hide()
+                self.btn_down.hide()
+                self.btn_latest.hide()
+            else:
+                self.current_view = 0
+                self.stacked.setCurrentIndex(0)
+                self.btn_watch.setText("实时盯盘")
+                self.btn_up.show()
+                self.btn_down.show()
+                self.btn_latest.show()
+        except Exception as e:
+            import traceback
+            print(f"toggle_view error: {e}")
+            traceback.print_exc()
+
+    def update_prices(self, price_data):
+        """Receive price data dict {code: {price, change_pct, name, timestamp}}."""
+        try:
+            for code, data in price_data.items():
+                if code in self.price_cards:
+                    self.price_cards[code].update_price(data)
+        except Exception as e:
+            import traceback
+            print(f"update_prices error: {e}")
+            traceback.print_exc()
+
+    def apply_price_settings(self, interval, node_count, card_order):
+        """Apply price monitoring settings (called from SettingsDialog)."""
+        self.price_interval = interval
+        self.price_node_count = node_count
+
+        # Reorder cards if order changed
+        if card_order != self.price_card_order:
+            self.price_card_order = card_order
+            # Remove all cards from layout (keep the stretch at end)
+            for i in range(self.cards_layout.count() - 1, -1, -1):
+                item = self.cards_layout.takeAt(i)
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
+            # Re-add stretch first, then insert cards before it
+            self.cards_layout.addStretch(1)
+            for code in card_order:
+                if code in self.price_cards:
+                    self.cards_layout.insertWidget(self.cards_layout.count() - 1, self.price_cards[code])
+
+        # Update node count on all cards
+        for card in self.price_cards.values():
+            card.set_node_count(node_count)
 
     # ------------------------------------------------------------------ #
     #  Positioning                                                        #
@@ -694,7 +1127,6 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.setFixedSize(380, 240)
         self.main_window = parent
 
         # Load current values from QSettings (falling back to defaults)
@@ -702,10 +1134,18 @@ class SettingsDialog(QDialog):
         current_max_cards = settings.value("max_cards", 1000, type=int)
         current_opacity = settings.value("mini_opacity", 0.0, type=float)
         current_interval = settings.value("fetch_interval", 600, type=int)
+        current_price_interval = settings.value("price_interval", 5, type=int)
+        current_price_nodes = settings.value("price_node_count", 30, type=int)
+        saved_order_str = settings.value("price_card_order", "", type=str)
+        if saved_order_str:
+            current_card_order = saved_order_str.split(",")
+        else:
+            current_card_order = [i["code"] for i in INSTRUMENTS]
 
-        self._setup_ui(current_max_cards, current_opacity, current_interval)
+        self._setup_ui(current_max_cards, current_opacity, current_interval,
+                       current_price_interval, current_price_nodes, current_card_order)
 
-    def _setup_ui(self, max_cards, opacity, interval):
+    def _setup_ui(self, max_cards, opacity, interval, price_interval, price_nodes, card_order):
         """Build the dialog layout with dark theme styling.
 
         Each parameter row has: [Label] [SpinBox] [ - ] [ + ]
@@ -744,7 +1184,7 @@ class SettingsDialog(QDialog):
             }
         """)
 
-        self.setFixedSize(420, 240)
+        self.setFixedSize(420, 600)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -842,6 +1282,73 @@ class SettingsDialog(QDialog):
         self.spin_interval.setSuffix(" 秒")
         layout.addLayout(make_param_row("新闻抓取间隔", self.spin_interval, 30))
 
+        # ── Section: Price monitoring ──
+        lbl_price = QLabel("价格盯盘设置")
+        lbl_price.setStyleSheet("color: #4da6ff; font-size: 14px; font-weight: bold;")
+        layout.addWidget(lbl_price)
+
+        # price_interval row
+        self.spin_price_interval = QSpinBox()
+        self.spin_price_interval.setRange(2, 60)
+        self.spin_price_interval.setValue(price_interval)
+        self.spin_price_interval.setSingleStep(1)
+        self.spin_price_interval.setSuffix(" 秒")
+        layout.addLayout(make_param_row("价格请求间隔", self.spin_price_interval, 1))
+
+        # price_node_count row
+        self.spin_price_nodes = QSpinBox()
+        self.spin_price_nodes.setRange(10, 120)
+        self.spin_price_nodes.setValue(price_nodes)
+        self.spin_price_nodes.setSingleStep(5)
+        layout.addLayout(make_param_row("折线图节点数", self.spin_price_nodes, 5))
+
+        # card_order QListWidget
+        order_label = QLabel("卡片排列顺序")
+        layout.addWidget(order_label)
+
+        order_row = QHBoxLayout()
+        self.list_order = QListWidget()
+        self.list_order.setFixedHeight(120)
+        self.list_order.setStyleSheet("""
+            QListWidget {
+                background-color: #333;
+                color: #e0e0e0;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 13px;
+            }
+            QListWidget::item { padding: 2px 4px; }
+            QListWidget::item:selected { background-color: #4da6ff; color: #fff; }
+        """)
+        for code in card_order:
+            inst = INST_BY_CODE.get(code)
+            if inst:
+                item = QListWidgetItem(inst["name"])
+                item.setData(Qt.ItemDataRole.UserRole, code)
+                self.list_order.addItem(item)
+
+        order_btns = QVBoxLayout()
+        order_btns.setSpacing(4)
+        self.btn_order_up = QPushButton("↑")
+        self.btn_order_up.setFixedSize(36, 32)
+        self.btn_order_up.setStyleSheet("""
+            QPushButton { background-color: #3a3a3a; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; font-size: 16px; font-weight: bold; }
+            QPushButton:hover { background-color: #4a4a4a; border: 1px solid #4da6ff; color: #fff; }
+            QPushButton:pressed { background-color: #2a2a2a; }
+        """)
+        self.btn_order_up.clicked.connect(lambda: self._move_card_item(-1))
+        self.btn_order_down = QPushButton("↓")
+        self.btn_order_down.setFixedSize(36, 32)
+        self.btn_order_down.setStyleSheet(self.btn_order_up.styleSheet())
+        self.btn_order_down.clicked.connect(lambda: self._move_card_item(1))
+        order_btns.addWidget(self.btn_order_up)
+        order_btns.addWidget(self.btn_order_down)
+        order_btns.addStretch()
+        order_row.addWidget(self.list_order)
+        order_row.addLayout(order_btns)
+        layout.addLayout(order_row)
+
         layout.addStretch()
 
         # --- Buttons (OK / Cancel) ---
@@ -882,6 +1389,17 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(self.btn_cancel)
         layout.addLayout(btn_row)
 
+    def _move_card_item(self, direction):
+        """Move the selected card order item up (-1) or down (+1)."""
+        row = self.list_order.currentRow()
+        if row < 0:
+            return
+        new_row = row + direction
+        if 0 <= new_row < self.list_order.count():
+            item = self.list_order.takeItem(row)
+            self.list_order.insertItem(new_row, item)
+            self.list_order.setCurrentRow(new_row)
+
     def apply_settings(self):
         """Save settings to QSettings and apply them to the MainWindow immediately.
 
@@ -921,6 +1439,21 @@ class SettingsDialog(QDialog):
             mw.fetcher_interval = new_interval
             mw.fetcher_thread.fetch_interval = new_interval
 
+            # --- price settings ---
+            new_price_interval = self.spin_price_interval.value()
+            new_price_nodes = self.spin_price_nodes.value()
+            new_card_order = []
+            for i in range(self.list_order.count()):
+                item = self.list_order.item(i)
+                new_card_order.append(item.data(Qt.ItemDataRole.UserRole))
+
+            settings.setValue("price_interval", new_price_interval)
+            settings.setValue("price_node_count", new_price_nodes)
+            settings.setValue("price_card_order", ",".join(new_card_order))
+
+            mw.price_fetcher_thread.interval = new_price_interval
+            mw.mini_window.apply_price_settings(new_price_interval, new_price_nodes, new_card_order)
+
 
 class MainWindow(QMainWindow):
     toggle_visibility_signal = pyqtSignal()
@@ -953,6 +1486,7 @@ class MainWindow(QMainWindow):
         self.max_cards = settings.value("max_cards", 1000, type=int)
         self.mini_opacity = settings.value("mini_opacity", 0.0, type=float)
         self.fetcher_interval = settings.value("fetch_interval", 600, type=int)
+        self.price_interval = settings.value("price_interval", 5, type=int)
 
         # Setup UI
         self.setup_ui()
@@ -975,6 +1509,11 @@ class MainWindow(QMainWindow):
         self.fetcher_thread = NewsFetcherThread(fetch_interval=self.fetcher_interval)
         self.fetcher_thread.news_updated.connect(self.add_news)
         self.fetcher_thread.start()
+
+        # Start Price Fetcher for real-time instrument monitoring
+        self.price_fetcher_thread = PriceFetcherThread(interval=self.price_interval)
+        self.price_fetcher_thread.prices_updated.connect(self.mini_window.update_prices)
+        self.price_fetcher_thread.start()
 
     def setup_global_hotkey(self):
         # Connect the signal to the toggle slot
@@ -1401,6 +1940,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'mini_window'):
             self.mini_window.hide()
         self.fetcher_thread.stop()
+        if hasattr(self, 'price_fetcher_thread'):
+            self.price_fetcher_thread.stop()
         QApplication.quit()
 
     # ------------------------------------------------------------------ #
@@ -1546,16 +2087,6 @@ class MainWindow(QMainWindow):
         self.highlight_current_match()
 
 def main():
-    # In PyInstaller windowed mode (console=False), sys.stdout and
-    # sys.stderr are None. Any print() call (e.g. inside except blocks)
-    # would then raise AttributeError and crash the app. Redirect them
-    # to os.devnull so print() becomes a silent no-op.
-    import os as _os
-    if sys.stdout is None:
-        sys.stdout = open(_os.devnull, 'w', encoding='utf-8', errors='replace')
-    if sys.stderr is None:
-        sys.stderr = open(_os.devnull, 'w', encoding='utf-8', errors='replace')
-
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Important for tray app
 
