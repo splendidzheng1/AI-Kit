@@ -5,18 +5,22 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QLabel, QScrollArea, QFrame, QSystemTrayIcon, QMenu, QPushButton, QSizePolicy, QTextEdit,
                              QDialog, QSpinBox, QDoubleSpinBox, QAbstractSpinBox,
-                             QStackedWidget, QListWidget, QListWidgetItem)
+                             QStackedWidget, QListWidget, QListWidgetItem, QMessageBox)
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize, QEvent, QSettings, QPointF
 from PyQt6.QtGui import QIcon, QFont, QAction, QPixmap, QPainter, QColor, QKeySequence, QShortcut
 from PIL import Image, ImageDraw
 import io
 import keyboard
 import time
+import threading
 import webbrowser
 
 # 全局快捷键配置
 # 可以在这里方便地修改快捷键
 GLOBAL_HOTKEY = 'shift+space'
+
+# 手动"立即抓取"的最小间隔（秒）：防止连点导致频繁请求新浪接口
+MANUAL_FETCH_MIN_GAP = 3
 
 # Mini mode default opacity (0.0 = fully transparent, 1.0 = fully opaque)
 # The window is practically invisible at 0.0 but still receives mouse events
@@ -42,6 +46,9 @@ INST_BY_CODE = {inst["code"]: inst for inst in INSTRUMENTS}
 
 class NewsFetcherThread(QThread):
     news_updated = pyqtSignal(list)
+    # 每轮抓取结束后发出，携带本轮"新增"条数。
+    # 手动"立即抓取一次"靠它给用户反馈（新增 N 条 / 暂无新快讯）。
+    fetch_finished = pyqtSignal(int)
 
     def __init__(self, fetch_interval=600):
         super().__init__()
@@ -49,31 +56,85 @@ class NewsFetcherThread(QThread):
         self.api_base = "http://zhibo.sina.com.cn/api/zhibo/feed"
         self.running = True
         self.fetch_interval = fetch_interval  # Configurable polling interval in seconds
+        # 手动抓取支持：用 Condition（而不是裸 Event）保证"立即抓取"和
+        # stop() 的唤醒都不会因为 clear/wait 的先后顺序而丢失。
+        self._cond = threading.Condition()
+        self._fetch_requested = False
+        self.is_fetching = False
+        self._last_fetch_start = 0.0
 
     def run(self):
         while self.running:
+            self.is_fetching = True
+            self._last_fetch_start = time.time()
+            new_count = 0
             try:
                 news_list = self.fetch_24h_news()
                 if news_list:
                     # 过滤已读
-                    new_items = []
-                    for news in news_list:
-                        if news['id'] not in self.seen_ids:
-                            self.seen_ids.add(news['id'])
-                            new_items.append(news)
-                    
+                    new_items = self._filter_new(news_list)
+
                     if new_items:
                         # 按时间正序排列
                         new_items.sort(key=lambda x: x.get("time", ""))
+                        new_count = len(new_items)
                         self.news_updated.emit(new_items)
             except Exception as e:
                 print(f"Fetch error: {e}")
-            
-            # Wait for the configurable interval before fetching again
-            for _ in range(self.fetch_interval):
-                if not self.running:
-                    return
-                self.msleep(1000)
+            finally:
+                self.is_fetching = False
+                self.fetch_finished.emit(new_count)
+
+            # 等待抓取间隔；期间若收到"立即抓取"或 stop() 会被立刻唤醒。
+            # 注意：running 也要在锁内判断，否则 stop() 的 notify 可能先于
+            # worker 进入 wait，导致白等一个完整间隔。
+            with self._cond:
+                if not self._fetch_requested and self.running:
+                    self._cond.wait(timeout=self.fetch_interval)
+                self._fetch_requested = False
+            if not self.running:
+                return
+
+    def _filter_new(self, news_list):
+        """过滤掉此前已经推送过的条目，并把新条目登记到已读集合。
+
+        Returns:
+            list: 本条真正"新"的条目（保持传入顺序，未排序）。
+        """
+        new_items = []
+        for news in news_list:
+            news_id = news.get('id')
+            if news_id not in self.seen_ids:
+                self.seen_ids.add(news_id)
+                new_items.append(news)
+        return new_items
+
+    def reset_seen(self):
+        """清空"已读"缓存。
+
+        界面上把新闻清空后必须调用本方法，否则下一次抓取会认为所有条目
+        "都推送过了"，于是清空后再点"立即抓取"一条都不会显示。
+        这里顺便把抓取冷却时间清零（``_last_fetch_start``），让用户清空后
+        可以马上手动抓一次而不被 3 秒冷却挡住。
+        """
+        self.seen_ids.clear()
+        self._last_fetch_start = 0.0
+
+    def request_fetch_now(self):
+        """立即抓取一次（打断当前的等待间隔）。
+
+        Returns:
+            bool: 请求被受理返回 True；正在抓取中、或距上次抓取不足
+                  ``MANUAL_FETCH_MIN_GAP`` 秒时返回 False。
+        """
+        if not self.running or self.is_fetching:
+            return False
+        if time.time() - self._last_fetch_start < MANUAL_FETCH_MIN_GAP:
+            return False
+        with self._cond:
+            self._fetch_requested = True
+            self._cond.notify_all()
+        return True
 
     def fetch_24h_news(self, page=1, page_size=20):
         url = f"{self.api_base}?page={page}&page_size={page_size}&zhibo_id=152"
@@ -128,6 +189,9 @@ class NewsFetcherThread(QThread):
 
     def stop(self):
         self.running = False
+        # 唤醒可能正卡在 Condition.wait() 里的线程，否则退出要等到下个间隔
+        with self._cond:
+            self._cond.notify_all()
         self.wait()
 
 
@@ -404,6 +468,19 @@ class AutoHeightTextEdit(QTextEdit):
         """)
         # Set a reasonable max height for the text area itself
         self.setMaximumHeight(150)
+        # Optional right-click handler. When set, the host window's menu is
+        # shown instead of QTextEdit's default edit menu, so global actions
+        # such as "清空新闻" are reachable from anywhere inside a card.
+        # Signature: callback(global_pos: QPoint)
+        self.context_menu_callback = None
+
+    def contextMenuEvent(self, event):
+        """Forward the right-click to the host window (see above)."""
+        if self.context_menu_callback is not None:
+            self.context_menu_callback(event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def sizeHint(self):
         # Calculate document height
@@ -424,10 +501,25 @@ class AutoHeightTextEdit(QTextEdit):
         super().mousePressEvent(event)
 
 class NewsCard(QFrame):
-    def __init__(self, news_data, parent=None):
+    def __init__(self, news_data, parent=None, context_menu_callback=None):
         super().__init__(parent)
         self.news_data = news_data
+        # Invoked on right-click: callback(global_pos, card)
+        self.context_menu_callback = context_menu_callback
         self.init_ui()
+
+    def contextMenuEvent(self, event):
+        """Show the host window's menu instead of an empty default one."""
+        if self.context_menu_callback is not None:
+            self.context_menu_callback(event.globalPos(), self)
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
+    def _forward_context_menu(self, global_pos):
+        """Right-click bubbling up from the inner text edit."""
+        if self.context_menu_callback is not None:
+            self.context_menu_callback(global_pos, self)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -463,6 +555,7 @@ class NewsCard(QFrame):
         # Content using AutoHeightTextEdit
         self.content_edit = AutoHeightTextEdit(self.news_data['rich_text'])
         self.content_edit.ctrl_clicked.connect(self.on_ctrl_click)
+        self.content_edit.context_menu_callback = self._forward_context_menu
         layout.addWidget(self.content_edit)
 
         # Images (Only show first one for simplicity if exists)
@@ -543,6 +636,15 @@ class MiniNewsWindow(QWidget):
     # Signal emitted when the user wants to return to normal mode.
     return_to_normal_mode = pyqtSignal()
 
+    # Signal emitted when the user asks to clear every news item. The main
+    # window handles the request so the main list and the mini history stay
+    # in sync no matter which side triggered it.
+    clear_news_requested = pyqtSignal()
+
+    # Signal emitted when the user asks for an immediate fetch. The main
+    # window owns the fetcher thread, so the request is forwarded to it.
+    fetch_now_requested = pyqtSignal()
+
     def __init__(self, parent=None, default_opacity=MINI_MODE_DEFAULT_OPACITY):
         super().__init__(parent)
         self.setWindowFlags(
@@ -583,6 +685,10 @@ class MiniNewsWindow(QWidget):
 
         # The current news card displayed inside this mini window
         self.current_card = None
+
+        # Placeholder label shown after the news have been cleared, so the
+        # window never keeps showing a stale card.
+        self.empty_label = None
 
         # Navigation history: list of news dicts, newest first (index 0).
         # ``current_index`` points to the item currently shown.
@@ -750,14 +856,32 @@ class MiniNewsWindow(QWidget):
         self.btn_latest.clicked.connect(self.show_latest)
         btn_layout.addWidget(self.btn_latest)
 
-        # View toggle button
-        self.btn_watch = QPushButton("实时盯盘")
+        # 立即抓取一次（新闻/实盘两个视图下都可用）
+        self.btn_fetch = QPushButton("刷新")
+        self.btn_fetch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_fetch.setToolTip("立即抓取一次新闻（右键菜单同样可用）")
+        self.btn_fetch.setStyleSheet(nav_btn_style)
+        self.btn_fetch.clicked.connect(self._request_fetch_now)
+        btn_layout.addWidget(self.btn_fetch)
+
+        # 清空新闻按钮：btn_bar 在新闻/实盘两个视图下都常驻，
+        # 所以两个模式里都能直接点到（右键菜单里也有同一功能）。
+        self.btn_clear = QPushButton("清空")
+        self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear.setToolTip("清空已抓取的新闻（右键菜单同样可用）")
+        self.btn_clear.setStyleSheet(nav_btn_style)
+        self.btn_clear.clicked.connect(self._request_clear_news)
+        btn_layout.addWidget(self.btn_clear)
+
+        # View toggle button（按需求排在"清空"和"正常模式"之间）
+        self.btn_watch = QPushButton("实盘")
         self.btn_watch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_watch.setToolTip("切换到实时盯盘视图")
         self.btn_watch.setStyleSheet(nav_btn_style)
         self.btn_watch.clicked.connect(self.toggle_view)
         btn_layout.addWidget(self.btn_watch)
 
-        btn_return = QPushButton("返回正常模式")
+        btn_return = QPushButton("正常模式")
         btn_return.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_return.setStyleSheet("""
             QPushButton {
@@ -836,16 +960,72 @@ class MiniNewsWindow(QWidget):
     # ------------------------------------------------------------------ #
 
     def contextMenuEvent(self, event):
-        """Right-click menu offering a return to normal mode."""
+        """Right-click anywhere on the mini window."""
+        self._news_context_menu(event.globalPos())
+        event.accept()
+
+    def _news_context_menu(self, global_pos, card=None):
+        """Shared right-click menu for the mini window and its news cards."""
         menu = QMenu(self)
-        action_return = QAction("返回正常模式", self)
+
+        action_fetch = QAction("立即抓取一次", self)
+        action_fetch.triggered.connect(self._request_fetch_now)
+        menu.addAction(action_fetch)
+
+        count = len(self.news_history)
+        action_clear = QAction(f"清空新闻 ({count})" if count else "清空新闻", self)
+        action_clear.setEnabled(count > 0)
+        action_clear.triggered.connect(self._request_clear_news)
+        menu.addAction(action_clear)
+
+        menu.addSeparator()
+        action_return = QAction("正常模式", self)
         action_return.triggered.connect(self.return_to_normal_mode.emit)
         menu.addAction(action_return)
-        menu.addSeparator()
+
         action_close = QAction("关闭", self)
         action_close.triggered.connect(self.hide)
         menu.addAction(action_close)
-        menu.exec(event.globalPos())
+
+        menu.exec(global_pos)
+
+    def _request_fetch_now(self):
+        """Ask the main window to fetch news right away."""
+        self.fetch_now_requested.emit()
+
+    def _request_clear_news(self):
+        """Ask the main window to clear every news item on both sides."""
+        self.clear_news_requested.emit()
+
+    def clear_news_history(self):
+        """Drop the local news history (called by the main window)."""
+        self.news_history = []
+        self.current_index = 0
+        self._clear_card_area()
+        self._show_empty_placeholder()
+        self._update_nav_buttons()
+
+    def _clear_card_area(self):
+        """Remove the current news card and/or the empty placeholder."""
+        if self.current_card is not None:
+            self.card_layout.removeWidget(self.current_card)
+            self.current_card.deleteLater()
+            self.current_card = None
+        if self.empty_label is not None:
+            self.card_layout.removeWidget(self.empty_label)
+            self.empty_label.deleteLater()
+            self.empty_label = None
+
+    def _show_empty_placeholder(self):
+        """Show a hint instead of a stale card when there is no news left."""
+        if self.empty_label is not None:
+            return
+        self.empty_label = QLabel("暂无快讯\n右键菜单可返回正常模式")
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setStyleSheet(
+            "color: #777; font-size: 12px; background: transparent;"
+        )
+        self.card_layout.addWidget(self.empty_label)
 
     # ------------------------------------------------------------------ #
     #  News update & navigation                                           #
@@ -913,6 +1093,8 @@ class MiniNewsWindow(QWidget):
         if self.news_history:
             self._display_at_index()
         else:
+            self._clear_card_area()
+            self._show_empty_placeholder()
             self._update_nav_buttons()
 
     def show_older(self):
@@ -1003,18 +1185,20 @@ class MiniNewsWindow(QWidget):
     def _display_at_index(self):
         """Render the news card at ``self.current_index``."""
         if not (0 <= self.current_index < len(self.news_history)):
+            self._clear_card_area()
+            self._show_empty_placeholder()
+            self._update_nav_buttons()
             return
 
         news_data = self.news_history[self.current_index]
 
-        # Remove the old card if it exists
-        if self.current_card is not None:
-            self.card_layout.removeWidget(self.current_card)
-            self.current_card.deleteLater()
-            self.current_card = None
+        # Remove the old card (or the empty placeholder) if present
+        self._clear_card_area()
 
         # Create a fresh NewsCard and add it to the container
-        self.current_card = NewsCard(news_data)
+        self.current_card = NewsCard(
+            news_data, context_menu_callback=self._news_context_menu
+        )
         self.card_layout.addWidget(self.current_card)
 
         # Window size is fixed, no need to adjust
@@ -1039,14 +1223,14 @@ class MiniNewsWindow(QWidget):
             if self.current_view == 0:
                 self.current_view = 1
                 self.stacked.setCurrentIndex(1)
-                self.btn_watch.setText("快讯信息")
+                self.btn_watch.setText("快讯")
                 self.btn_up.hide()
                 self.btn_down.hide()
                 self.btn_latest.hide()
             else:
                 self.current_view = 0
                 self.stacked.setCurrentIndex(0)
-                self.btn_watch.setText("实时盯盘")
+                self.btn_watch.setText("实盘")
                 self.btn_up.show()
                 self.btn_down.show()
                 self.btn_latest.show()
@@ -1481,6 +1665,13 @@ class MainWindow(QMainWindow):
         self.mini_mode_active = False
         self.latest_news = None  # Keep track of the newest news item
 
+        # Placeholder label shown while the list is empty (at startup or
+        # after the user cleared every news item).
+        self.empty_hint = None
+
+        # 是否有一次"手动抓取"正在等待结果（用于抓取完成后的反馈提示）
+        self._pending_manual_fetch = False
+
         # Load persisted settings (override class-level defaults)
         settings = QSettings()
         self.max_cards = settings.value("max_cards", 1000, type=int)
@@ -1504,10 +1695,16 @@ class MainWindow(QMainWindow):
         # Use the persisted opacity value instead of the module-level constant
         self.mini_window = MiniNewsWindow(default_opacity=self.mini_opacity)
         self.mini_window.return_to_normal_mode.connect(self.exit_mini_mode)
+        # 迷你窗里点"清空"也交给主窗口处理，保证两侧数据一致
+        self.mini_window.clear_news_requested.connect(self._on_mini_clear_request)
+        # 迷你窗里"立即抓取"同样交给主窗口（抓取线程归主窗口所有）
+        self.mini_window.fetch_now_requested.connect(self.fetch_news_now)
 
         # Start Fetcher with configurable interval
         self.fetcher_thread = NewsFetcherThread(fetch_interval=self.fetcher_interval)
         self.fetcher_thread.news_updated.connect(self.add_news)
+        # 每轮抓取结束后回调，用于手动抓取的反馈提示
+        self.fetcher_thread.fetch_finished.connect(self._on_fetch_finished)
         self.fetcher_thread.start()
 
         # Start Price Fetcher for real-time instrument monitoring
@@ -1742,6 +1939,9 @@ class MainWindow(QMainWindow):
         self.scroll_area.setWidget(self.news_container)
         main_layout.addWidget(self.scroll_area)
 
+        # Startup hint — replaced automatically by the first fetched batch.
+        self._show_empty_hint()
+
         # Apply style to the main window for background
         # We need a background for the frameless window, otherwise it might be fully transparent depending on OS
         # Using a slight semi-transparent white or solid white
@@ -1794,6 +1994,49 @@ class MainWindow(QMainWindow):
             }
         """)
 
+        # Clear News Button (Floating, below the mini mode button)
+        self.clear_news_btn = QPushButton("🗑", self)
+        self.clear_news_btn.setFixedSize(30, 30)
+        self.clear_news_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_news_btn.setToolTip("清空新闻（右键菜单同样可用）")
+        self.clear_news_btn.clicked.connect(lambda: self.clear_all_news(confirm=True))
+        self.clear_news_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #aaa;
+                font-size: 16px;
+                border: none;
+            }
+            QPushButton:hover {
+                color: #ff6666;
+                background-color: rgba(255,255,255,0.1);
+                border-radius: 15px;
+            }
+        """)
+
+        # Refresh News Button (Floating, below the clear button)
+        self.refresh_news_btn = QPushButton("⟳", self)
+        self.refresh_news_btn.setFixedSize(30, 30)
+        self.refresh_news_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_news_btn.setToolTip("立即抓取一次新闻（右键菜单同样可用）")
+        self.refresh_news_btn.clicked.connect(self.fetch_news_now)
+        self.refresh_news_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #aaa;
+                font-size: 18px;
+                border: none;
+            }
+            QPushButton:hover {
+                color: #4dff88;
+                background-color: rgba(255,255,255,0.1);
+                border-radius: 15px;
+            }
+            QPushButton:disabled {
+                color: #555;
+            }
+        """)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # Keep close button at top-right corner
@@ -1803,6 +2046,12 @@ class MainWindow(QMainWindow):
         # no longer overlaps the search input on the right side.
         if hasattr(self, 'mini_btn'):
             self.mini_btn.move(self.width() - 35, 40)
+        # 清空按钮紧跟在迷你模式按钮下方
+        if hasattr(self, 'clear_news_btn'):
+            self.clear_news_btn.move(self.width() - 35, 75)
+        # 立即抓取按钮排在清空按钮下方
+        if hasattr(self, 'refresh_news_btn'):
+            self.refresh_news_btn.move(self.width() - 35, 110)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1852,8 +2101,18 @@ class MainWindow(QMainWindow):
         quit_action = QAction("退出", self)
         quit_action.triggered.connect(self.quit_app)
 
+        # Clear-news action — the same capability is also available from the
+        # right-click menu of both the normal and the mini mode.
+        fetch_action = QAction("立即抓取", self)
+        fetch_action.triggered.connect(self.fetch_news_now)
+
+        clear_action = QAction("清空新闻", self)
+        clear_action.triggered.connect(lambda: self.clear_all_news(confirm=True))
+
         self.tray_menu.addAction(show_action)
         self.tray_menu.addAction(self.mini_action)
+        self.tray_menu.addAction(fetch_action)
+        self.tray_menu.addAction(clear_action)
         self.tray_menu.addAction(settings_action)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(quit_action)
@@ -1991,9 +2250,12 @@ class MainWindow(QMainWindow):
             event.accept()
 
     def add_news(self, news_list):
+        # Drop the empty-state hint as soon as real content arrives
+        self._clear_empty_hint()
+
         # Insert new news at the top
         for news in news_list:
-            card = NewsCard(news)
+            card = NewsCard(news, context_menu_callback=self._news_context_menu)
             self.news_layout.insertWidget(0, card)
 
         # Track the latest news item.
@@ -2020,6 +2282,193 @@ class MainWindow(QMainWindow):
         # Let's keep it but check if search input is visible.
         if self.search_widget.isVisible() and self.search_input.text():
             self.perform_search(self.search_input.text())
+
+    # ------------------------------------------------------------------ #
+    #  Fetch now (manual refresh)                                        #
+    # ------------------------------------------------------------------ #
+
+    def fetch_news_now(self):
+        """立即抓取一次新闻。
+
+        主窗口悬浮按钮、右键菜单、托盘菜单、迷你窗按钮与右键菜单全部
+        走这一个入口。抓取在后台线程执行，**不做任何弹窗/浮层文字提示**，
+        只用按钮短暂置灰表示"请求已下发"。
+
+        Returns:
+            bool: 请求是否被受理；冷却中或正在抓取时静默返回 False。
+        """
+        if not hasattr(self, 'fetcher_thread'):
+            return False
+        if not self.fetcher_thread.request_fetch_now():
+            # 冷却中 / 正在抓取：直接忽略，不给任何提示
+            return False
+        self._pending_manual_fetch = True
+        self._set_fetch_buttons_enabled(False)
+        # 兜底：万一抓取线程异常没回调，20 秒后也把按钮恢复
+        QTimer.singleShot(20000, lambda: self._set_fetch_buttons_enabled(True))
+        return True
+
+    def _set_fetch_buttons_enabled(self, enabled):
+        """只切换主窗口与迷你窗抓取按钮的可用状态，不改任何提示语。"""
+        buttons = [getattr(self, 'refresh_news_btn', None)]
+        if hasattr(self, 'mini_window'):
+            buttons.append(getattr(self.mini_window, 'btn_fetch', None))
+        for btn in buttons:
+            if btn is not None:
+                btn.setEnabled(enabled)
+
+    def _on_fetch_finished(self, new_count):
+        """抓取线程每轮结束后回调：恢复手动抓取时置灰的按钮（无提示）。"""
+        if not getattr(self, '_pending_manual_fetch', False):
+            return
+        self._pending_manual_fetch = False
+        self._set_fetch_buttons_enabled(True)
+
+    # ------------------------------------------------------------------ #
+    #  Clear news (normal mode)                                          #
+    # ------------------------------------------------------------------ #
+
+    def clear_all_news(self, confirm=True, parent_widget=None):
+        """清空已抓取的全部新闻（主窗口列表 + 迷你窗历史）。
+
+        Args:
+            confirm: 是否弹出二次确认对话框，默认 True。
+            parent_widget: 确认框的父窗口。从迷你模式触发时传迷你窗，
+                避免确认框挂在已隐藏的主窗口上。
+
+        Returns:
+            bool: 真正执行了清空返回 True；用户取消或本来无内容返回 False。
+        """
+        card_count = self.news_layout.count()
+        # 空态提示本身也占一个 layout item，统计时要排除
+        if self.empty_hint is not None:
+            card_count -= 1
+        history_count = (
+            len(self.mini_window.news_history) if hasattr(self, 'mini_window') else 0
+        )
+        total = max(card_count, history_count)
+        if total <= 0:
+            return False
+
+        if confirm:
+            box_parent = parent_widget if parent_widget is not None else self
+            reply = QMessageBox.question(
+                box_parent,
+                "清空新闻",
+                f"确定要清空当前 {total} 条新闻吗？\n清空后新抓取的快讯仍会正常显示。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+
+        # 1) 移除主窗口里的所有新闻卡片
+        self._clear_empty_hint()
+        while self.news_layout.count():
+            item = self.news_layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        # 2) 重置搜索状态：search_matches 保存的是卡片引用，卡片销毁后
+        #    必须清掉，否则再次搜索会访问已析构的对象
+        self.search_matches = []
+        self.current_match_index = -1
+        if hasattr(self, 'lbl_match_count'):
+            self.lbl_match_count.setText("")
+
+        # 3) 清掉"最新一条"缓存、重置抓取线程的已读去重表（否则下一次抓取
+        #    会认为全部条目都已推送过，清空后再点"立即抓取"什么都不显示），
+        #    并同步清空迷你窗历史
+        self.latest_news = None
+        if hasattr(self, 'fetcher_thread'):
+            self.fetcher_thread.reset_seen()
+        if hasattr(self, 'mini_window'):
+            self.mini_window.clear_news_history()
+
+        # 4) 显示空态提示
+        self._show_empty_hint()
+        return True
+
+    def _on_mini_clear_request(self):
+        """迷你模式里触发清空：统一走主窗口，保证两边数据一致。"""
+        self.clear_all_news(confirm=True, parent_widget=self.mini_window)
+
+    def _show_empty_hint(self):
+        """列表为空时显示占位提示（启动初期 / 清空之后）。"""
+        if self.empty_hint is not None:
+            return
+        self.empty_hint = QLabel("暂无新闻\n新快讯会自动显示；右键可清空 / 切换迷你模式")
+        self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_hint.setStyleSheet("color: #666; font-size: 12px; padding: 24px 8px;")
+        self.news_layout.addWidget(self.empty_hint)
+
+    def _clear_empty_hint(self):
+        """移除空态占位提示。"""
+        if self.empty_hint is None:
+            return
+        self.news_layout.removeWidget(self.empty_hint)
+        self.empty_hint.deleteLater()
+        self.empty_hint = None
+
+    # ------------------------------------------------------------------ #
+    #  Right-click menu (normal mode)                                     #
+    # ------------------------------------------------------------------ #
+
+    def _news_context_menu(self, global_pos, card=None):
+        """正常模式的新闻右键菜单；``card`` 为被右键的那一张卡片。"""
+        menu = QMenu(self)
+
+        if card is not None:
+            edit = card.content_edit
+            act_copy = QAction("复制所选文字", self)
+            act_copy.setEnabled(edit.textCursor().hasSelection())
+            act_copy.triggered.connect(edit.copy)
+            menu.addAction(act_copy)
+
+            act_all = QAction("全选文字", self)
+            act_all.triggered.connect(edit.selectAll)
+            menu.addAction(act_all)
+
+            if card.news_data.get('images'):
+                act_image = QAction("查看图片", self)
+                act_image.triggered.connect(card.on_ctrl_click)
+                menu.addAction(act_image)
+
+            menu.addSeparator()
+
+        count = self.news_layout.count()
+        if self.empty_hint is not None:
+            count -= 1
+        act_fetch = QAction("立即抓取一次", self)
+        act_fetch.triggered.connect(self.fetch_news_now)
+        menu.addAction(act_fetch)
+
+        act_clear = QAction(
+            f"清空全部新闻 ({count})" if count > 0 else "清空全部新闻", self
+        )
+        act_clear.setEnabled(count > 0)
+        act_clear.triggered.connect(lambda: self.clear_all_news(confirm=True))
+        menu.addAction(act_clear)
+
+        menu.addSeparator()
+        act_mini = QAction("进入迷你模式", self)
+        act_mini.triggered.connect(self.enter_mini_mode)
+        menu.addAction(act_mini)
+
+        act_settings = QAction("设置", self)
+        act_settings.triggered.connect(self.open_settings)
+        menu.addAction(act_settings)
+
+        menu.exec(global_pos)
+
+    def contextMenuEvent(self, event):
+        """空白区域右键 → 与卡片右键同一套菜单。"""
+        self._news_context_menu(event.globalPos())
+        event.accept()
 
     def perform_search(self, text):
         # Reset highlights
